@@ -1,0 +1,121 @@
+# jcs_support_agent.py
+
+import os
+import requests
+from bs4 import BeautifulSoup
+import streamlit as st
+from dotenv import load_dotenv
+
+from langchain.chat_models import ChatOpenAI
+from langchain.vectorstores import Chroma
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.document_loaders import TextLoader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain.chains import RetrievalQA
+
+# ---------------------- LOAD API KEY ----------------------
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# ---------------------- SCRAPE WEBSITE ----------------------
+def scrape_site():
+    urls = {
+        "home": "https://jcsdigitech.com/",
+        "services": "https://jcsdigitech.com/services/",
+        "website_development": "https://jcsdigitech.com/website-development/",
+        "seo": "https://jcsdigitech.com/seo/",
+        "ppc": "https://jcsdigitech.com/pay-per-click/",
+        "lead_generation": "https://jcsdigitech.com/lead-generation-automation/",
+        "funnels": "https://jcsdigitech.com/funnel-landing-page/",
+        "contact": "https://jcsdigitech.com/contact-us/"
+    }
+
+    os.makedirs("data", exist_ok=True)
+
+    for name, url in urls.items():
+        try:
+            res = requests.get(url, timeout=10)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.text, "html.parser")
+            for tag in soup(["script", "style", "noscript"]):
+                tag.decompose()
+            text = soup.get_text(separator="\n").strip()
+            with open(f"data/{name}.txt", "w", encoding="utf-8") as f:
+                f.write(text)
+            print(f"✅ Scraped {url}")
+        except Exception as e:
+            print(f"❌ Failed to scrape {url}: {e}")
+
+# ---------------------- BUILD VECTOR DB ----------------------
+def build_vector_db():
+    docs = []
+    for file in os.listdir("data"):
+        if file.endswith(".txt"):
+            loader = TextLoader(os.path.join("data", file))
+            docs.extend(loader.load())
+
+    splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    texts = splitter.split_documents(docs)
+
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=OPENAI_API_KEY)
+    vectordb = Chroma.from_documents(documents=texts, embedding=embeddings, persist_directory="db")
+    vectordb.persist()
+
+# ---------------------- RETRIEVAL QA CHAIN ----------------------
+def get_qa_chain():
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=OPENAI_API_KEY)
+    vectordb = Chroma(persist_directory="db", embedding_function=embeddings)
+    retriever = vectordb.as_retriever(search_type="mmr", k=4)
+
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.5, openai_api_key=OPENAI_API_KEY)
+
+    return RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+
+# ---------------------- STREAMLIT APP ----------------------
+st.set_page_config(page_title="JCS Support Agent", layout="wide")
+st.title("🤖 JCS Digitech Support Agent")
+
+tab1, tab2, tab3 = st.tabs(["💬 Chat", "🛠 Services", "📞 Contact"])
+
+# Chat Tab
+with tab1:
+    st.subheader("Ask me anything about JCS Digitech:")
+    query = st.text_input("Your question")
+    if query:
+        try:
+            chain = get_qa_chain()
+            result = chain(query)
+            st.markdown(f"**🎯 Answer:** {result['result']}")
+            with st.expander("📚 Source Documents"):
+                for doc in result["source_documents"]:
+                    st.markdown(f"- {doc.metadata['source']}")
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
+
+# Services Tab
+with tab2:
+    st.subheader("Our Core Services")
+    st.markdown("""
+    - 🌐 Website Development  
+    - 🎯 Landing Pages & Funnels  
+    - 📈 Search Engine Optimization (SEO)  
+    - 💰 Google Ads Campaigns  
+    - 📱 Facebook & Instagram Ads  
+    - 🤖 Lead Generation & Automation  
+    """)
+
+# Contact Tab
+with tab3:
+    st.subheader("📞 Contact Us")
+    st.markdown("""
+    - 📧 Email: [hello@jcsdigitech.com](mailto:hello@jcsdigitech.com)  
+    - 📱 Phone: +91-XXXXXXXXXX  
+    - 🌐 Website: [www.jcsdigitech.com](https://www.jcsdigitech.com)
+    """)
+
+# First-time init: scrape + embed
+if not os.path.exists("db"):
+    with st.spinner("🔄 Preparing knowledge base..."):
+        scrape_site()
+        build_vector_db()
+        st.success("✅ Ready to go!")
